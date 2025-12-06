@@ -1,5 +1,6 @@
 const express = require('express')
 const router = express.Router()
+
 const { protect } = require('../middleware/authMiddleware')
 
 const {
@@ -9,11 +10,19 @@ const {
   getMessages,
 } = require('../controllers/message.controller')
 
-router.post('/', protect, createMessage)
-router.post('/:chatId/messages', protect, createMessage)
+const { messageLimiter, regenerateLimiter } = require('../utils/rateLimiter')
+
+router.post('/', protect, messageLimiter, createMessage)
+router.post('/:chatId/messages', protect, messageLimiter, createMessage)
 
 router.get('/:chatId/messages', protect, getMessages)
+
 router.patch('/:messageId', protect, editMessage)
-router.post('/:messageId/regenerate', protect, regenerateMessage)
+router.post(
+  '/:messageId/regenerate',
+  protect,
+  regenerateLimiter,
+  regenerateMessage
+)
 
 module.exports = router

@@ -4,10 +4,12 @@ const validate = require('../middleware/validate')
 const { signupSchema, loginSchema } = require('../validators/auth.validator')
 const { protect } = require('../middleware/authMiddleware')
 
+const { signupLimiter, loginLimiter } = require('../utils/rateLimiter')
+
 const router = express.Router()
 
-router.post('/signup', validate(signupSchema), signup)
-router.post('/login', validate(loginSchema), login)
+router.post('/signup', signupLimiter, validate(signupSchema), signup)
+router.post('/login', loginLimiter, validate(loginSchema), login)
 router.get('/me', protect, me)
 
 module.exports = router

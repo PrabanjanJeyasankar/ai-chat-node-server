@@ -3,11 +3,22 @@ const providers = require('../config/providers')
 const { ApiError } = require('../utils/ApiError')
 const logger = require('../utils/logger')
 
-const resolveProvider = () => {
-  return {
-    provider: 'gemini',
-    model: providers.gemini.model,
-    apiKey: providers.gemini.apiKey,
+const { MAX_SINGLE_MESSAGE_CHARS, ERRORS } = require('../config/llmLimits')
+
+const resolveProvider = () => ({
+  provider: 'gemini',
+  model: providers.gemini.model,
+  apiKey: providers.gemini.apiKey,
+})
+
+const validateLLMInput = (messages) => {
+  if (!messages || messages.length === 0) return
+
+  const last = messages[messages.length - 1]
+  const charCount = [...last.content].length
+
+  if (charCount > MAX_SINGLE_MESSAGE_CHARS) {
+    throw new ApiError(400, ERRORS.TOO_LONG_SINGLE)
   }
 }
 
@@ -21,15 +32,12 @@ const callGemini = async (model, messages) => {
     const response = await axios.post(
       `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${providers.gemini.apiKey}`,
       { contents },
-      {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 30000,
-      }
+      { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
     )
 
-    const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
-
-    return text.trim()
+    return (
+      response.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || ''
+    )
   } catch (error) {
     logger.error('Gemini API error:', error.response?.data || error.message)
 
@@ -51,16 +59,19 @@ const generateTitlePrompt = (message) => [
 ]
 
 const processLLM = async ({ messages, isFirstMessage }) => {
+  validateLLMInput(messages)
+
   const { model } = resolveProvider()
 
   const assistantReply = await callGemini(model, messages)
 
   let autoTitle = null
-
   if (isFirstMessage) {
-    const titlePrompt = generateTitlePrompt(messages[0].content)
-    const raw = await callGemini(model, titlePrompt)
-    autoTitle = raw.replace(/["']/g, '').trim()
+    const raw = await callGemini(
+      model,
+      generateTitlePrompt(messages[0].content)
+    )
+    autoTitle = raw.replace(/["']/g, '').trim().slice(0, 80)
   }
 
   return {
@@ -69,6 +80,4 @@ const processLLM = async ({ messages, isFirstMessage }) => {
   }
 }
 
-module.exports = {
-  processLLM,
-}
+module.exports = { processLLM }
