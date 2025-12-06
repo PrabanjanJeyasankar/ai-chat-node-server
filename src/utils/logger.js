@@ -12,15 +12,27 @@ const write = (level, message) => {
 }
 
 const devLogger = {
-  info: (msg) => console.log(msg),
-  warn: (msg) => console.warn(msg),
-  error: (msg) => console.error(msg),
+  info: (...args) => console.log(...args),
+  warn: (...args) => console.warn(...args),
+  error: (...args) => console.error(...args),
 }
 
 const prodLogger = {
-  info: (msg) => write('INFO', msg),
-  warn: (msg) => write('WARN', msg),
-  error: (msg) => write('ERROR', msg),
+  info: (...args) =>
+    write(
+      'INFO',
+      args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : a)).join(' ')
+    ),
+  warn: (...args) =>
+    write(
+      'WARN',
+      args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : a)).join(' ')
+    ),
+  error: (...args) =>
+    write(
+      'ERROR',
+      args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : a)).join(' ')
+    ),
 }
 
 module.exports = process.env.NODE_ENV === 'production' ? prodLogger : devLogger

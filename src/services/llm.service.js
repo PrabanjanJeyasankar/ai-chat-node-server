@@ -1,111 +1,66 @@
 const axios = require('axios')
-const { ai } = require('../config')
 const providers = require('../config/providers')
 const { ApiError } = require('../utils/ApiError')
 const logger = require('../utils/logger')
 
-const resolveProvider = (modelName) => {
-  if (ai.provider === 'ollama') {
-    logger.info(`Using Ollama with model: ${ai.defaultModelOllama}`, modelName)
-    return {
-      provider: 'ollama',
-      baseUrl: providers.ollama.baseUrl,
-      model: ai.defaultModelOllama,
-    }
-  }
-
+const resolveProvider = () => {
   return {
-    provider: 'openrouter',
-    baseUrl: providers.openrouter.baseUrl,
-    model: modelName || ai.defaultModelOpenRouter,
-    apiKey: providers.openrouter.apiKey,
+    provider: 'gemini',
+    model: providers.gemini.model,
+    apiKey: providers.gemini.apiKey,
   }
 }
 
-const callOpenRouter = async (model, messages) => {
+const callGemini = async (model, messages) => {
   try {
+    const contents = messages.map((m) => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    }))
+
     const response = await axios.post(
-      `${providers.openrouter.baseUrl}/chat/completions`,
-      { model, messages },
+      `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${providers.gemini.apiKey}`,
+      { contents },
       {
-        headers: {
-          Authorization: `Bearer ${providers.openrouter.apiKey}`,
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 30000,
       }
     )
 
-    return response.data.choices?.[0]?.message?.content || ''
+    const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+
+    return text.trim()
   } catch (error) {
+    logger.error('Gemini API error:', error.response?.data || error.message)
+
     throw new ApiError(
-      500,
-      error?.response?.data?.error || 'OpenRouter request failed'
+      error.response?.status || 500,
+      error.response?.data?.error?.message || 'Gemini request failed',
+      error.response?.data || {}
     )
   }
 }
 
-const callOllama = async (model, messages) => {
-  try {
-    const response = await axios.post(
-      `${providers.ollama.baseUrl}/api/chat`,
-      { model, messages, stream: false },
-      { headers: { 'Content-Type': 'application/json' } }
-    )
+const generateTitlePrompt = (message) => [
+  {
+    role: 'user',
+    content:
+      "Generate a short factual title summarizing the user's message. Strict rules: 1) Maximum 4 words, 2) No poetic or motivational phrases, 3) No punctuation, 4) Must directly reflect message topic, 5) Output only the title.",
+  },
+  { role: 'user', content: message },
+]
 
-    return response.data?.message?.content || ''
-  } catch (error) {
-    throw new ApiError(
-      500,
-      error?.response?.data?.error || 'Ollama request failed'
-    )
-  }
-}
+const processLLM = async ({ messages, isFirstMessage }) => {
+  const { model } = resolveProvider()
 
-const generateTitlePrompt = (userMessage) => {
-  return [
-    {
-      role: 'system',
-      content: `
-You create short, meaningful titles (maximum 4 words).
-
-Rules:
-- Always produce a real, meaningful topic-based title.
-- Never say things like "Invalid input", "No query", "Error", or apologies.
-- Never repeat the user message verbatim.
-- Never output meta-text (e.g., "Here is your title").
-- Even if the user message is unclear, extremely short, or messy, infer the most likely general topic.
-- If the content is ambiguous, choose a broad, reasonable category (e.g., "General Query", "User Assistance", "Quick Question", "Casual Inquiry").
-- Output ONLY the title. No punctuation around it.
-`,
-    },
-    { role: 'user', content: userMessage },
-  ]
-}
-
-const processLLM = async ({ model, messages, isFirstMessage }) => {
-  const { provider, baseUrl } = resolveProvider(model)
-  const finalModel = resolveProvider(model).model
-
-  let assistantReply = ''
-
-  if (provider === 'openrouter') {
-    assistantReply = await callOpenRouter(finalModel, messages)
-  } else {
-    assistantReply = await callOllama(finalModel, messages)
-  }
+  const assistantReply = await callGemini(model, messages)
 
   let autoTitle = null
 
   if (isFirstMessage) {
     const titlePrompt = generateTitlePrompt(messages[0].content)
-
-    if (provider === 'openrouter') {
-      autoTitle = await callOpenRouter(finalModel, titlePrompt)
-    } else {
-      autoTitle = await callOllama(finalModel, titlePrompt)
-    }
-
-    autoTitle = autoTitle.replace(/["']/g, '').trim()
+    const raw = await callGemini(model, titlePrompt)
+    autoTitle = raw.replace(/["']/g, '').trim()
   }
 
   return {

@@ -6,13 +6,31 @@ const createMessage = asyncHandler(async (request, response) => {
   const chatId = request.params.chatId || null
   const { content } = request.body
 
-  const result = await messageService.createMessage({
-    chatId,
-    userId: request.user.id,
-    content,
-  })
+  try {
+    const result = await messageService.createMessage({
+      chatId,
+      userId: request.user.id,
+      content,
+    })
 
-  return success(response, 201, 'Message created', result)
+    return success(response, 201, 'Message created', result)
+  } catch (error) {
+    const status = error.statusCode || error.status || 500
+
+    const message =
+      error?.message ||
+      error?.response?.data?.error ||
+      error?.response?.data?.message ||
+      'LLM generation failed'
+
+    const details = error?.details || error?.response?.data || {}
+
+    return response.status(status).json({
+      success: false,
+      message,
+      details,
+    })
+  }
 })
 
 const editMessage = asyncHandler(async (request, response) => {

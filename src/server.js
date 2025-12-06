@@ -1,6 +1,7 @@
 const connectDB = require('./config/db')
 const app = require('./app')
 const config = require('./config')
+const { initQdrantCollections } = require('./lib/qdrant.collections')
 
 process.on('uncaughtException', (error) => {
   console.error('Uncaught exception:', error)
@@ -9,17 +10,13 @@ process.on('uncaughtException', (error) => {
 
 const startServer = async () => {
   await connectDB()
+  await initQdrantCollections()
 
   const server = app.listen(config.server.port, () => {
     const { host, port, env } = config.server
 
-    const provider = process.env.AI_PROVIDER || 'unknown'
-    const activeModel =
-      provider === 'openrouter'
-        ? process.env.OPENROUTER_MODEL || 'none'
-        : provider === 'ollama'
-        ? process.env.OLLAMA_MODEL || 'none'
-        : 'none'
+    const provider = process.env.AI_PROVIDER || 'hf'
+    const activeModel = 'embeddings-only'
 
     const version = process.env.npm_package_version || '1.0.0'
     const nodeVersion = process.version
@@ -54,6 +51,8 @@ const startServer = async () => {
     `
     )
   })
+
+  server.setTimeout(30000)
 
   process.on('unhandledRejection', (error) => {
     console.error('Unhandled rejection:', error)

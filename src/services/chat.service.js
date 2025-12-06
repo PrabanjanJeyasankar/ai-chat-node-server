@@ -1,6 +1,8 @@
 const Chat = require('../models/Chat')
+const Message = require('../models/Message')
 const { ApiError } = require('../utils/ApiError')
 const { ai } = require('../config')
+const MemoryService = require('../services/embeddings/memory.service')
 
 const createChat = async ({ userId, firstMessageContent }) => {
   const provisionalTitle =
@@ -65,9 +67,13 @@ const deleteChat = async (chatId, userId) => {
   })
 
   if (!deletionResult) throw new ApiError(404, 'Chat not found')
+
+  await Message.deleteMany({ chatId })
+
+  await MemoryService.deleteChatMemory(chatId)
+
   return deletionResult
 }
-
 module.exports = {
   createChat,
   setFinalTitle,
