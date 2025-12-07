@@ -43,7 +43,7 @@ Welcome to the AI Chat Server documentation. This guide provides comprehensive i
 
 ## 📚 Documentation Files
 
-### [API Documentation](./API_DOCUMENTATION.md)
+### [API Documentation](docs/API_DOCUMENTATION.md)
 
 Complete reference for all API endpoints including:
 
@@ -55,7 +55,7 @@ Complete reference for all API endpoints including:
 - Error handling
 - Rate limiting
 
-### [CI/CD Pipeline](./CI_CD_PIPELINE.md)
+### [CI/CD Pipeline](docs/CI_CD_PIPELINE.md)
 
 Continuous Integration and Deployment documentation:
 
@@ -66,7 +66,7 @@ Continuous Integration and Deployment documentation:
 - Best practices
 - Rollback procedures
 
-### [AWS Infrastructure](./AWS_INFRASTRUCTURE.md)
+### [AWS Infrastructure](docs/AWS_INFRASTRUCTURE.md)
 
 Cloud infrastructure and deployment architecture:
 
@@ -82,20 +82,20 @@ Cloud infrastructure and deployment architecture:
 
 ### For API Consumers
 
-1. Read the [API Documentation](./API_DOCUMENTATION.md)
+1. Read the [API Documentation](docs/API_DOCUMENTATION.md)
 2. Obtain an API token by signing up
 3. Start making requests to the endpoints
 
 ### For Developers
 
-1. Review the [CI/CD Pipeline](./CI_CD_PIPELINE.md) to understand the deployment process
-2. Check the [AWS Infrastructure](./AWS_INFRASTRUCTURE.md) for environment setup
+1. Review the [CI/CD Pipeline](docs/CI_CD_PIPELINE.md) to understand the deployment process
+2. Check the [AWS Infrastructure](docs/AWS_INFRASTRUCTURE.md) for environment setup
 3. Configure GitHub Secrets for automated deployment
 
 ### For DevOps Engineers
 
-1. Start with [AWS Infrastructure](./AWS_INFRASTRUCTURE.md) for server setup
-2. Configure [CI/CD Pipeline](./CI_CD_PIPELINE.md) for automated deployments
+1. Start with [AWS Infrastructure](docs/AWS_INFRASTRUCTURE.md) for server setup
+2. Configure [CI/CD Pipeline](docs/CI_CD_PIPELINE.md) for automated deployments
 3. Set up monitoring and backups as described
 
 ## 🏗️ Architecture Overview
