@@ -1,5 +1,6 @@
 const express = require('express')
 const cors = require('cors')
+const cookieParser = require('cookie-parser')
 const router = require('./routes')
 const { AppError, errorHandler } = require('./middleware/errorHandler')
 const logger = require('./utils/logger')
@@ -14,6 +15,7 @@ app.use((request, response, next) => {
 })
 
 app.use(cors(config.cors))
+app.use(cookieParser())
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
 

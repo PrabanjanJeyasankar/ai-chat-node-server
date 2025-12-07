@@ -3,9 +3,15 @@ const User = require('../models/User')
 const { AppError } = require('../middleware/errorHandler')
 const config = require('../config')
 
-const generateToken = (userId) => {
+const generateAccessToken = (userId) => {
   return jwt.sign({ id: userId }, config.auth.jwtSecret, {
-    expiresIn: '30d',
+    expiresIn: config.auth.accessTokenExpiry,
+  })
+}
+
+const generateRefreshToken = (userId) => {
+  return jwt.sign({ id: userId }, config.auth.jwtRefreshSecret, {
+    expiresIn: config.auth.refreshTokenExpiry,
   })
 }
 
@@ -47,9 +53,32 @@ const getUserById = (id) => {
   return User.findById(id).select('-password')
 }
 
+const storeRefreshToken = async (userId, refreshToken) => {
+  await User.findByIdAndUpdate(userId, { refreshToken })
+}
+
+const verifyRefreshToken = async (token) => {
+  const decoded = jwt.verify(token, config.auth.jwtRefreshSecret)
+  const user = await User.findById(decoded.id)
+
+  if (!user || user.refreshToken !== token) {
+    throw new AppError('Invalid refresh token', 401)
+  }
+
+  return user
+}
+
+const clearRefreshToken = async (userId) => {
+  await User.findByIdAndUpdate(userId, { refreshToken: null })
+}
+
 module.exports = {
   createUser,
   validateUserCredentials,
-  generateToken,
+  generateAccessToken,
+  generateRefreshToken,
+  storeRefreshToken,
+  verifyRefreshToken,
+  clearRefreshToken,
   getUserById,
 }

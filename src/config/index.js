@@ -14,6 +14,9 @@ module.exports = {
 
   auth: {
     jwtSecret: process.env.JWT_SECRET,
+    jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET,
+    accessTokenExpiry: process.env.ACCESS_TOKEN_EXPIRY || '15m',
+    refreshTokenExpiry: process.env.REFRESH_TOKEN_EXPIRY || '7d',
   },
 
   cors: {

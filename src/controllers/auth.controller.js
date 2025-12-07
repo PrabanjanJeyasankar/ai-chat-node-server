@@ -2,13 +2,24 @@ const { asyncHandler } = require('../middleware/asyncHandler')
 const authService = require('../services/auth.service')
 const logger = require('../utils/logger')
 const { success } = require('../utils/response')
+const { AppError } = require('../middleware/errorHandler')
 
 const signup = asyncHandler(async (request, response) => {
   const { email, password, name } = request.body
 
   const result = await authService.createUser(email, password, name)
 
-  const token = authService.generateToken(result.user._id)
+  const accessToken = authService.generateAccessToken(result.user._id)
+  const refreshToken = authService.generateRefreshToken(result.user._id)
+
+  await authService.storeRefreshToken(result.user._id, refreshToken)
+
+  response.cookie('refreshToken', refreshToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  })
 
   if (result.existing) {
     return success(
@@ -20,7 +31,7 @@ const signup = asyncHandler(async (request, response) => {
           id: result.user._id,
           email: result.user.email,
         },
-        token,
+        accessToken,
       }
     )
   }
@@ -30,7 +41,7 @@ const signup = asyncHandler(async (request, response) => {
       id: result.user._id,
       email: result.user.email,
     },
-    token,
+    accessToken,
   })
 })
 
@@ -38,14 +49,24 @@ const login = asyncHandler(async (request, response) => {
   const { email, password } = request.body
 
   const user = await authService.validateUserCredentials(email, password)
-  const token = authService.generateToken(user._id)
+  const accessToken = authService.generateAccessToken(user._id)
+  const refreshToken = authService.generateRefreshToken(user._id)
+
+  await authService.storeRefreshToken(user._id, refreshToken)
+
+  response.cookie('refreshToken', refreshToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  })
 
   success(response, 200, 'Login successful', {
     user: {
       id: user._id,
       email: user.email,
     },
-    token,
+    accessToken,
   })
 })
 
@@ -61,8 +82,37 @@ const me = asyncHandler(async (request, response) => {
   })
 })
 
+const refresh = asyncHandler(async (request, response) => {
+  const refreshToken = request.cookies.refreshToken
+
+  if (!refreshToken) {
+    throw new AppError('Refresh token not found', 401)
+  }
+
+  const user = await authService.verifyRefreshToken(refreshToken)
+  const accessToken = authService.generateAccessToken(user._id)
+
+  success(response, 200, 'Token refreshed successfully', {
+    accessToken,
+  })
+})
+
+const logout = asyncHandler(async (request, response) => {
+  await authService.clearRefreshToken(request.user.id)
+
+  response.clearCookie('refreshToken', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+  })
+
+  success(response, 200, 'Logged out successfully', {})
+})
+
 module.exports = {
   signup,
   login,
   me,
+  refresh,
+  logout,
 }
