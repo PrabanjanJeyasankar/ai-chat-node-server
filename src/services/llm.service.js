@@ -1,15 +1,28 @@
 const axios = require('axios')
 const providers = require('../config/providers')
+const config = require('../config')
 const { ApiError } = require('../utils/ApiError')
 const logger = require('../utils/logger')
 
 const { MAX_SINGLE_MESSAGE_CHARS, ERRORS } = require('../config/llmLimits')
 
-const resolveProvider = () => ({
-  provider: 'gemini',
-  model: providers.gemini.model,
-  apiKey: providers.gemini.apiKey,
-})
+const resolveProvider = () => {
+  const provider = config.ai.provider || 'gemini'
+
+  if (provider === 'ollama') {
+    return {
+      name: 'ollama',
+      model: providers.ollama.model,
+      baseUrl: providers.ollama.baseUrl,
+    }
+  }
+
+  return {
+    name: 'gemini',
+    model: providers.gemini.model,
+    apiKey: providers.gemini.apiKey,
+  }
+}
 
 const validateLLMInput = (messages) => {
   if (!messages || messages.length === 0) return
@@ -49,6 +62,33 @@ const callGemini = async (model, messages) => {
   }
 }
 
+const callOllama = async ({ baseUrl, model, messages }) => {
+  try {
+    const url = `${baseUrl.replace(/\/$/, '')}/api/chat`
+
+    const response = await axios.post(
+      url,
+      {
+        model,
+        messages,
+        stream: false,
+      },
+      { headers: { 'Content-Type': 'application/json' }, timeout: 300000 }
+    )
+
+    const content = response.data?.message?.content || ''
+    return content.trim()
+  } catch (error) {
+    logger.error('Ollama API error:', error.response?.data || error.message)
+
+    throw new ApiError(
+      error.response?.status || 500,
+      error.response?.data?.error || 'Ollama request failed',
+      error.response?.data || {}
+    )
+  }
+}
+
 const generateTitlePrompt = (message) => [
   {
     role: 'user',
@@ -61,16 +101,26 @@ const generateTitlePrompt = (message) => [
 const processLLM = async ({ messages, isFirstMessage }) => {
   validateLLMInput(messages)
 
-  const { model } = resolveProvider()
+  const { name, model, baseUrl } = resolveProvider()
 
-  const assistantReply = await callGemini(model, messages)
+  let assistantReply
+  if (name === 'ollama') {
+    assistantReply = await callOllama({ baseUrl, model, messages })
+  } else {
+    assistantReply = await callGemini(model, messages)
+  }
 
   let autoTitle = null
   if (isFirstMessage) {
-    const raw = await callGemini(
-      model,
-      generateTitlePrompt(messages[0].content)
-    )
+    const titleMessages = generateTitlePrompt(messages[0].content)
+
+    let raw
+    if (name === 'ollama') {
+      raw = await callOllama({ baseUrl, model, messages: titleMessages })
+    } else {
+      raw = await callGemini(model, titleMessages)
+    }
+
     autoTitle = raw.replace(/["']/g, '').trim().slice(0, 80)
   }
 
