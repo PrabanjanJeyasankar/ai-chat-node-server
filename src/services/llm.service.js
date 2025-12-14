@@ -2,8 +2,6 @@ const axios = require('axios')
 const providers = require('../config/providers')
 const config = require('../config')
 const { ApiError } = require('../utils/ApiError')
-const logger = require('../utils/logger')
-
 const { MAX_SINGLE_MESSAGE_CHARS, ERRORS } = require('../config/llmLimits')
 
 const resolveProvider = () => {
@@ -36,57 +34,35 @@ const validateLLMInput = (messages) => {
 }
 
 const callGemini = async (model, messages) => {
-  try {
-    const contents = messages.map((m) => ({
-      role: m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: m.content }],
-    }))
+  const contents = messages.map((m) => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  }))
 
-    const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${providers.gemini.apiKey}`,
-      { contents },
-      { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
-    )
+  const response = await axios.post(
+    `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${providers.gemini.apiKey}`,
+    { contents },
+    { headers: { 'Content-Type': 'application/json' }, timeout: 30000 }
+  )
 
-    return (
-      response.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || ''
-    )
-  } catch (error) {
-    logger.error('Gemini API error:', error.response?.data || error.message)
-
-    throw new ApiError(
-      error.response?.status || 500,
-      error.response?.data?.error?.message || 'Gemini request failed',
-      error.response?.data || {}
-    )
-  }
+  return response.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || ''
 }
 
 const callOllama = async ({ baseUrl, model, messages }) => {
-  try {
-    const url = `${baseUrl.replace(/\/$/, '')}/api/chat`
+  const url = `${baseUrl.replace(/\/$/, '')}/api/chat`
 
-    const response = await axios.post(
-      url,
-      {
-        model,
-        messages,
-        stream: false,
-      },
-      { headers: { 'Content-Type': 'application/json' }, timeout: 300000 }
-    )
+  const response = await axios.post(
+    url,
+    {
+      model,
+      messages,
+      stream: false,
+    },
+    { headers: { 'Content-Type': 'application/json' }, timeout: 300000 }
+  )
 
-    const content = response.data?.message?.content || ''
-    return content.trim()
-  } catch (error) {
-    logger.error('Ollama API error:', error.response?.data || error.message)
-
-    throw new ApiError(
-      error.response?.status || 500,
-      error.response?.data?.error || 'Ollama request failed',
-      error.response?.data || {}
-    )
-  }
+  const content = response.data?.message?.content || ''
+  return content.trim()
 }
 
 const generateTitlePrompt = (message) => [

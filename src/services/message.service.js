@@ -4,193 +4,257 @@ const { ApiError } = require('../utils/ApiError')
 const { processLLM } = require('./llm.service')
 const chatService = require('./chat.service')
 const memoryService = require('./embeddings/memory.service')
-const NewsService = require('./embeddings/news.service')
-const logger = require('../utils/logger')
 const chatHistoryCache = require('../cache/chatHistoryCache')
+const { runNewsRagPipeline } = require('../rag/pipeline/ragPipeline')
+const { createProgressData } = require('../utils/progressMessages')
 
 const getLatestVersionContent = (message) =>
   message.versions[message.currentVersionIndex].content
 
-const createMessage = async ({ chatId, userId, content, mode }) => {
-  let chat = null
-  let isFirstMessage = false
+const emitProgress = (onProgress, stage, substage, additionalData = {}) => {
+  if (onProgress && typeof onProgress === 'function') {
+    const progressData = createProgressData(stage, substage, additionalData)
+    onProgress(stage, progressData)
+  }
+}
 
-  if (!chatId) {
-    chat = await chatService.createChat({
-      userId,
-      firstMessageContent: content,
-      mode,
+const buildMemoryInstructions = (memory) => {
+  if (memory.length === 0) return ''
+
+  const memoryContext = memory.map((m) => `(${m.role}) ${m.text}`).join('\n')
+
+  return `
+You have access to previous important context:
+${memoryContext}
+
+Do NOT mention memory in your answer.
+`
+}
+
+const buildNewsContext = (newsResults) => {
+  if (newsResults.length === 0) return ''
+
+  const sourcesList = newsResults
+    .map((result, idx) => {
+      const { title, url, source, startLine, endLine, text } = result.payload
+      return `
+SOURCE ${idx + 1}:
+Title: ${title}
+URL: ${url}
+Source: ${source}
+Lines: ${startLine}-${endLine}
+Content:
+${text}
+---`
     })
-    chatId = chat._id
-    isFirstMessage = true
-  } else {
-    chat = await Chat.findById(chatId)
-    if (!chat) throw new ApiError(404, 'Chat not found')
-
-    if (mode && mode !== chat.mode) {
-      logger.info(`Switching chat ${chatId} from ${chat.mode} to ${mode}`)
-      chat.mode = mode
-      await chat.save()
-    }
-  }
-
-  const userMessage = await Message.create({
-    chatId,
-    userId,
-    role: 'user',
-    mode: chat.mode,
-    versions: [{ content }],
-    currentVersionIndex: 0,
-  })
-
-  await memoryService.saveMessageVector({
-    userId,
-    chatId,
-    messageId: userMessage._id,
-    role: 'user',
-    content,
-  })
-
-  // memory recall only when not first message
-  let memory = []
-  let memoryInstructions = ''
-
-  if (!isFirstMessage) {
-    memory = await memoryService.searchRelevant({
-      userId,
-      chatId,
-      content,
-      limit: 5,
-      minScore: 0.35,
-    })
-
-    if (memory.length > 0) {
-      const memoryContext = memory
-        .map((m) => `(${m.role}) ${m.text}`)
-        .join('\n')
-
-      memoryInstructions = `
-        You have access to previous important context:
-        ${memoryContext}
-
-        Do NOT mention memory in your answer.
-      `
-    }
-  }
-
-  let newsContext = ''
-  let newsResults = []
-
-  logger.info(`Chat ${chatId} mode: ${chat.mode}, requested mode: ${mode}`)
-
-  if (chat.mode === 'news') {
-    logger.info(`News RAG mode active for chat ${chatId}`)
-
-    newsResults = await NewsService.searchNews(content)
-
-    if (newsResults.length > 0) {
-      const sourcesList = newsResults
-        .map((result, idx) => {
-          const { title, url, source, startLine, endLine, text } =
-            result.payload
-          return `
-            SOURCE ${idx + 1}:
-            Title: ${title}
-            URL: ${url}
-            Source: ${source}
-            Lines: ${startLine}-${endLine}
-            Content:
-            ${text}
-            ---`
-        })
-        .join('\n\n')
-
-      newsContext = `
-        You are a news-based AI assistant. Your ONLY job is to answer questions using information from the news articles provided below. 
-
-        CRITICAL RULES:
-        1. ONLY use information that appears in the sources below - do NOT add general knowledge
-        2. Start your answer with "Based on recent news coverage:" 
-        3. Cite specific sources for each fact: (Source: [Title])
-        4. If the sources don't contain enough information to answer the question, say "The available news sources don't contain sufficient information to answer this question."
-        5. Focus on the SPECIFIC content from these news articles, not general information
-
-        NEWS SOURCES:
-        ${sourcesList}
-
-        REMEMBER: Your response must be grounded ONLY in the content above. Do not supplement with general knowledge about the topic.
-                    `
-
-      logger.info(
-        `News RAG: ${newsResults.length} sources added to context for chat ${chatId}`
-      )
-    } else {
-      logger.info(`News RAG: No relevant sources found for chat ${chatId}`)
-    }
-  }
-
-  const systemContent = [memoryInstructions, newsContext]
-    .filter((s) => s.trim())
     .join('\n\n')
 
-  const llmMessages = [
-    ...(systemContent ? [{ role: 'system', content: systemContent }] : []),
-    { role: 'user', content },
-  ]
+  return `
+You must answer strictly using the provided context.
+If the answer is not fully supported by the context, say you don't have enough information.
+Do not add external knowledge.
 
-  const { assistantReply, title } = await processLLM({
-    model: chat.model,
-    messages: llmMessages,
-    isFirstMessage,
-  })
+CONTEXT:
+${sourcesList}
+`
+}
 
-  let messageSources = []
-  if (chat.mode === 'news' && newsResults.length > 0) {
-    messageSources = newsResults.map((result) => ({
-      title: result.payload.title,
-      url: result.payload.url,
-      source: result.payload.source,
-      lines: `${result.payload.startLine}-${result.payload.endLine}`,
-      publishedAt: new Date(result.payload.publishedAt).toISOString(),
-      similarity: result.score,
-      finalScore: result.finalScore,
-    }))
-  }
+const buildMessageSources = (newsResults) => {
+  return newsResults.map((result) => ({
+    title: result.payload.title,
+    url: result.payload.url,
+    source: result.payload.source,
+    lines: `${result.payload.startLine}-${result.payload.endLine}`,
+    publishedAt: new Date(result.payload.publishedAt).toISOString(),
+    similarity: result.rerankScore ?? 0,
+    finalScore: result.rerankScore ?? 0,
+  }))
+}
 
-  const assistantMessage = await Message.create({
-    chatId,
-    userId: null,
-    role: 'assistant',
-    mode: chat.mode,
-    versions: [{ content: assistantReply, model: chat.model }],
-    currentVersionIndex: 0,
-    sources: messageSources,
-  })
+const createMessage = async ({ chatId, userId, content, mode, onProgress }) => {
+  try {
+    emitProgress(onProgress, 'chat_setup', 'initializing')
 
-  // Best-effort cache update for per-session (chatId) history
-  chatHistoryCache
-    .append(chatId.toString(), [userMessage, assistantMessage])
-    .catch(() => {})
+    let chat = null
+    let isFirstMessage = false
 
-  await memoryService.saveMessageVector({
-    userId,
-    chatId,
-    messageId: assistantMessage._id,
-    role: 'assistant',
-    content: assistantReply,
-  })
+    if (!chatId) {
+      emitProgress(onProgress, 'chat_setup', 'creating_new_chat')
+      chat = await chatService.createChat({
+        userId,
+        firstMessageContent: content,
+        mode,
+      })
+      chatId = chat._id
+      isFirstMessage = true
+    } else {
+      emitProgress(onProgress, 'chat_setup', 'loading_existing_chat')
+      chat = await Chat.findById(chatId)
+      if (!chat) throw new ApiError(404, 'Chat not found')
 
-  chat.lastMessage = content
-  chat.lastMessageAt = new Date()
-  if (isFirstMessage && title) chat.title = title
-  await chat.save()
+      if (mode && mode !== chat.mode) {
+        chat.mode = mode
+        await chat.save()
+      }
+    }
 
-  return {
-    chatId,
-    userMessage,
-    assistantMessage,
-    isFirstMessage,
-    title,
+    emitProgress(onProgress, 'chat_setup', 'completed', { chatId })
+    emitProgress(onProgress, 'user_message', 'creating')
+
+    const userMessage = await Message.create({
+      chatId,
+      userId,
+      role: 'user',
+      mode: chat.mode,
+      versions: [{ content }],
+      currentVersionIndex: 0,
+    })
+
+    emitProgress(onProgress, 'user_message', 'completed', {
+      messageId: userMessage._id,
+    })
+
+    emitProgress(onProgress, 'memory_vector', 'processing')
+
+    await memoryService.saveMessageVector({
+      userId,
+      chatId,
+      messageId: userMessage._id,
+      role: 'user',
+      content,
+    })
+
+    emitProgress(onProgress, 'memory_vector', 'completed')
+
+    let memory = []
+
+    if (!isFirstMessage && chat.mode !== 'news') {
+      emitProgress(onProgress, 'memory_recall', 'searching')
+
+      memory = await memoryService.searchRelevant({
+        userId,
+        chatId,
+        content,
+        limit: 5,
+        minScore: 0.35,
+      })
+
+      if (memory.length > 0) {
+        emitProgress(onProgress, 'memory_recall', 'found', {
+          count: memory.length,
+        })
+      } else {
+        emitProgress(onProgress, 'memory_recall', 'none_found')
+      }
+    }
+
+    let newsResults = []
+    let newsAbortMessage = null
+
+    if (chat.mode === 'news') {
+      emitProgress(onProgress, 'rag_pipeline', 'starting', {
+        source: 'news articles',
+      })
+
+      const ragResult = await runNewsRagPipeline({
+        query: content,
+        onProgress: (stage, data) => emitProgress(onProgress, stage, data),
+      })
+
+      if (!ragResult.ok) {
+        emitProgress(onProgress, 'rag_pipeline', 'insufficient_data')
+        newsAbortMessage = ragResult.message
+      } else {
+        emitProgress(onProgress, 'rag_pipeline', 'completed', {
+          count: ragResult.chunks?.length || 0,
+        })
+        newsResults = ragResult.chunks
+      }
+    }
+
+    const memoryInstructions = buildMemoryInstructions(memory)
+    const newsContext = buildNewsContext(newsResults)
+
+    const systemContent = (
+      chat.mode === 'news' ? [newsContext] : [memoryInstructions, newsContext]
+    )
+      .filter((s) => s.trim())
+      .join('\n\n')
+
+    let assistantReply = null
+    let title = null
+
+    if (chat.mode === 'news' && newsAbortMessage) {
+      assistantReply = newsAbortMessage
+    } else {
+      const llmMessages = [
+        ...(systemContent ? [{ role: 'system', content: systemContent }] : []),
+        { role: 'user', content },
+      ]
+
+      emitProgress(onProgress, 'llm_generation', 'generating', {
+        model: chat.model,
+      })
+
+      const llmOut = await processLLM({
+        model: chat.model,
+        messages: llmMessages,
+        isFirstMessage,
+      })
+
+      emitProgress(onProgress, 'llm_generation', 'completed', {
+        model: chat.model,
+      })
+
+      assistantReply = llmOut.assistantReply
+      title = llmOut.title
+    }
+
+    const messageSources =
+      chat.mode === 'news' && newsResults.length > 0
+        ? buildMessageSources(newsResults)
+        : []
+
+    emitProgress(onProgress, 'assistant_message', 'creating')
+
+    const assistantMessage = await Message.create({
+      chatId,
+      userId: null,
+      role: 'assistant',
+      mode: chat.mode,
+      versions: [{ content: assistantReply, model: chat.model }],
+      currentVersionIndex: 0,
+      sources: messageSources,
+    })
+
+    chatHistoryCache
+      .append(chatId.toString(), [userMessage, assistantMessage])
+      .catch(() => {})
+
+    await memoryService.saveMessageVector({
+      userId,
+      chatId,
+      messageId: assistantMessage._id,
+      role: 'assistant',
+      content: assistantReply,
+    })
+
+    emitProgress(onProgress, 'assistant_message', 'completed')
+
+    chat.lastMessage = content
+    chat.lastMessageAt = new Date()
+    if (isFirstMessage && title) chat.title = title
+    await chat.save()
+
+    return {
+      chatId,
+      userMessage,
+      assistantMessage,
+      isFirstMessage,
+      title,
+    }
+  } catch (error) {
+    throw error
   }
 }
 
@@ -204,13 +268,11 @@ const editUserMessage = async ({ messageId, newContent }) => {
   message.currentVersionIndex = message.versions.length - 1
   await message.save()
 
-  // Message versions changed; invalidate cached history
   chatHistoryCache.invalidate(message.chatId.toString()).catch(() => {})
 
   const chat = await Chat.findById(message.chatId)
   if (!chat) throw new ApiError(404, 'Chat not found')
 
-  // Backfill mode for older messages
   if (!message.mode) {
     message.mode = chat.mode || 'default'
   }
@@ -223,70 +285,54 @@ const editUserMessage = async ({ messageId, newContent }) => {
     content: newContent,
   })
 
-  const memory = await memoryService.searchRelevant({
-    userId: message.userId,
-    chatId: message.chatId,
-    content: newContent,
-    limit: 5,
-  })
-
-  const memoryContext = memory.map((m) => `(${m.role}) ${m.text}`).join('\n')
-
-  let newsContext = ''
-  let newsResults = []
-  if (chat.mode === 'news') {
-    newsResults = await NewsService.searchNews(newContent)
-
-    if (newsResults.length > 0) {
-      const sourcesList = newsResults
-        .map((result, idx) => {
-          const { title, url, source, startLine, endLine, text } =
-            result.payload
-          return `
-              SOURCE ${idx + 1}:
-              Title: ${title}
-              URL: ${url}
-              Source: ${source}
-              Lines: ${startLine}-${endLine}
-              Content:
-              ${text}
-              ---`
+  const memory =
+    chat.mode === 'news'
+      ? []
+      : await memoryService.searchRelevant({
+          userId: message.userId,
+          chatId: message.chatId,
+          content: newContent,
+          limit: 5,
         })
-        .join('\n\n')
 
-      newsContext = `
-              You are answering based on news articles. Follow these rules strictly:
+  let newsResults = []
+  let newsAbortMessage = null
 
-              AVAILABLE SOURCES:
-              ${sourcesList}
-
-              CITATION RULES:
-              1. Only state facts that are directly supported by the sources above.
-              2. For each fact, add a citation at the end of the sentence: (found in: <Title>, lines X-Y)
-              3. If a question cannot be answered from the sources, say "I don't have information about that in the available news sources."
-              4. Do NOT mention Qdrant, embeddings, vector databases, or any internal system details.
-              5. Be concise and accurate.
-          `
+  if (chat.mode === 'news') {
+    const ragResult = await runNewsRagPipeline({ query: newContent })
+    if (!ragResult.ok) {
+      newsAbortMessage = ragResult.message
+    } else {
+      newsResults = ragResult.chunks
     }
   }
 
-  const systemContent = [
-    memory.length ? `Use past context to respond:\n\n` + memoryContext : '',
-    newsContext,
-  ]
+  const memoryInstructions = buildMemoryInstructions(memory)
+  const newsContext = buildNewsContext(newsResults)
+
+  const systemContent = (
+    chat.mode === 'news' ? [newsContext] : [memoryInstructions, newsContext]
+  )
     .filter((s) => s.trim())
     .join('\n\n')
 
-  const llmInput = [
-    ...(systemContent ? [{ role: 'system', content: systemContent }] : []),
-    { role: 'user', content: newContent },
-  ]
+  let assistantReply = null
+  if (chat.mode === 'news' && newsAbortMessage) {
+    assistantReply = newsAbortMessage
+  } else {
+    const llmInput = [
+      ...(systemContent ? [{ role: 'system', content: systemContent }] : []),
+      { role: 'user', content: newContent },
+    ]
 
-  const { assistantReply } = await processLLM({
-    model: chat.model,
-    messages: llmInput,
-    isFirstMessage: false,
-  })
+    const llmOut = await processLLM({
+      model: chat.model,
+      messages: llmInput,
+      isFirstMessage: false,
+    })
+
+    assistantReply = llmOut.assistantReply
+  }
 
   const assistant = await Message.findOne({
     chatId: message.chatId,
@@ -299,20 +345,10 @@ const editUserMessage = async ({ messageId, newContent }) => {
     assistant.mode = chat.mode || 'default'
   }
 
-  // Update assistant sources if in news mode
-  if (chat.mode === 'news' && newsResults.length > 0) {
-    assistant.sources = newsResults.map((result) => ({
-      title: result.payload.title,
-      url: result.payload.url,
-      source: result.payload.source,
-      lines: `${result.payload.startLine}-${result.payload.endLine}`,
-      publishedAt: new Date(result.payload.publishedAt).toISOString(),
-      similarity: result.score,
-      finalScore: result.finalScore,
-    }))
-  } else {
-    assistant.sources = []
-  }
+  assistant.sources =
+    chat.mode === 'news' && newsResults.length > 0
+      ? buildMessageSources(newsResults)
+      : []
 
   assistant.versions.push({ content: assistantReply, model: chat.model })
   assistant.currentVersionIndex = assistant.versions.length - 1
@@ -341,7 +377,6 @@ const regenerateAssistantResponse = async ({ messageId }) => {
   const chat = await Chat.findById(userMessage.chatId)
   if (!chat) throw new ApiError(404, 'Chat not found')
 
-  // Assistant output will change; invalidate cached history
   chatHistoryCache.invalidate(userMessage.chatId.toString()).catch(() => {})
 
   if (!userMessage.mode) {
@@ -351,72 +386,54 @@ const regenerateAssistantResponse = async ({ messageId }) => {
 
   const latestUserText = getLatestVersionContent(userMessage)
 
-  const memory = await memoryService.searchRelevant({
-    userId: userMessage.userId,
-    chatId: userMessage.chatId,
-    content: latestUserText,
-    limit: 5,
-  })
-
-  const memoryContext = memory.map((m) => `(${m.role}) ${m.text}`).join('\n')
-
-  let newsContext = ''
-  let newsResults = []
-  if (chat.mode === 'news') {
-    newsResults = await NewsService.searchNews(latestUserText)
-
-    if (newsResults.length > 0) {
-      const sourcesList = newsResults
-        .map((result, idx) => {
-          const { title, url, source, startLine, endLine, text } =
-            result.payload
-          return `
-          SOURCE ${idx + 1}:
-          Title: ${title}
-          URL: ${url}
-          Source: ${source}
-          Lines: ${startLine}-${endLine}
-          Content:
-          ${text}
-          ---`
+  const memory =
+    chat.mode === 'news'
+      ? []
+      : await memoryService.searchRelevant({
+          userId: userMessage.userId,
+          chatId: userMessage.chatId,
+          content: latestUserText,
+          limit: 5,
         })
-        .join('\n\n')
 
-      newsContext = `
-          You are a news-based AI assistant. Your ONLY job is to answer questions using information from the news articles provided below. 
+  let newsResults = []
+  let newsAbortMessage = null
 
-          CRITICAL RULES:
-          1. ONLY use information that appears in the sources below - do NOT add general knowledge
-          2. Start your answer with "Based on recent news coverage:" 
-          3. Cite specific sources for each fact: (Source: [Title])
-          4. If the sources don't contain enough information to answer the question, say "The available news sources don't contain sufficient information to answer this question."
-          5. Focus on the SPECIFIC content from these news articles, not general information
-
-          NEWS SOURCES:
-          ${sourcesList}
-
-          REMEMBER: Your response must be grounded ONLY in the content above. Do not supplement with general knowledge about the topic.
-          `
+  if (chat.mode === 'news') {
+    const ragResult = await runNewsRagPipeline({ query: latestUserText })
+    if (!ragResult.ok) {
+      newsAbortMessage = ragResult.message
+    } else {
+      newsResults = ragResult.chunks
     }
   }
 
-  const systemContent = [
-    memory.length ? `Use past context:\n` + memoryContext : '',
-    newsContext,
-  ]
+  const memoryInstructions = buildMemoryInstructions(memory)
+  const newsContext = buildNewsContext(newsResults)
+
+  const systemContent = (
+    chat.mode === 'news' ? [newsContext] : [memoryInstructions, newsContext]
+  )
     .filter((s) => s.trim())
     .join('\n\n')
 
-  const llmInput = [
-    ...(systemContent ? [{ role: 'system', content: systemContent }] : []),
-    { role: 'user', content: latestUserText },
-  ]
+  let assistantReply = null
+  if (chat.mode === 'news' && newsAbortMessage) {
+    assistantReply = newsAbortMessage
+  } else {
+    const llmInput = [
+      ...(systemContent ? [{ role: 'system', content: systemContent }] : []),
+      { role: 'user', content: latestUserText },
+    ]
 
-  const { assistantReply } = await processLLM({
-    model: chat.model,
-    messages: llmInput,
-    isFirstMessage: false,
-  })
+    const llmOut = await processLLM({
+      model: chat.model,
+      messages: llmInput,
+      isFirstMessage: false,
+    })
+
+    assistantReply = llmOut.assistantReply
+  }
 
   const assistant = await Message.findOne({
     chatId: userMessage.chatId,
@@ -427,20 +444,10 @@ const regenerateAssistantResponse = async ({ messageId }) => {
     assistant.mode = chat.mode || 'default'
   }
 
-  // Update assistant sources if in news mode
-  if (chat.mode === 'news' && newsResults.length > 0) {
-    assistant.sources = newsResults.map((result) => ({
-      title: result.payload.title,
-      url: result.payload.url,
-      source: result.payload.source,
-      lines: `${result.payload.startLine}-${result.payload.endLine}`,
-      publishedAt: new Date(result.payload.publishedAt).toISOString(),
-      similarity: result.score,
-      finalScore: result.finalScore,
-    }))
-  } else {
-    assistant.sources = []
-  }
+  assistant.sources =
+    chat.mode === 'news' && newsResults.length > 0
+      ? buildMessageSources(newsResults)
+      : []
 
   assistant.versions.push({ content: assistantReply, model: chat.model })
   assistant.currentVersionIndex = assistant.versions.length - 1

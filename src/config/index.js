@@ -42,4 +42,8 @@ module.exports = {
     inMemoryMaxChats:
       Number(process.env.CHAT_HISTORY_IN_MEMORY_MAX_CHATS) || 200,
   },
+
+  rag: {
+    rerankerUrl: process.env.RERANKER_URL || null,
+  },
 }

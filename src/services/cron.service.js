@@ -1,4 +1,5 @@
 const NewsIngestService = require('./news.ingest.service')
+const NewsService = require('./embeddings/news.service')
 const logger = require('../utils/logger')
 
 class CronService {
@@ -27,6 +28,9 @@ class CronService {
   static async runInitialIngestion() {
     try {
       logger.info('Running initial news ingestion on startup...')
+      await NewsService.warmupKeywordIndexFromMongo().catch((err) => {
+        logger.warn(`Keyword index warmup failed: ${err.message}`)
+      })
       const results = await NewsIngestService.ingestAll()
       logger.info(
         `Initial ingestion complete: ${results.successful} articles ingested`
