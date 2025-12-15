@@ -5,7 +5,19 @@ const logger = require('../utils/logger')
 let client = null
 
 try {
-  const qdrantOptions = { url: config.qdrant.url }
+  if (
+    process.env.NODE_ENV === 'production' &&
+    (!process.env.QDRANT_URL || process.env.QDRANT_URL.trim() === '')
+  ) {
+    logger.error(
+      'QDRANT_URL is not set in production; defaulting to http://localhost:6333 will fail on Render. Set QDRANT_URL (and QDRANT_API_KEY for Qdrant Cloud).'
+    )
+  }
+
+  const qdrantOptions = {
+    url: config.qdrant.url,
+    checkCompatibility: config.qdrant.checkCompatibility,
+  }
   if (config.qdrant.apiKey) {
     qdrantOptions.apiKey = config.qdrant.apiKey
   }

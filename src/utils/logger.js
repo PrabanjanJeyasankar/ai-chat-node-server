@@ -43,6 +43,7 @@ const devLogger = {
 const prodLogger = {
   debug: (...args) => {
     if (!shouldLog('debug')) return
+    console.log(...args)
     write(
       'DEBUG',
       args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : a)).join(' ')
@@ -50,6 +51,7 @@ const prodLogger = {
   },
   info: (...args) => {
     if (!shouldLog('info')) return
+    console.log(...args)
     write(
       'INFO',
       args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : a)).join(' ')
@@ -57,6 +59,7 @@ const prodLogger = {
   },
   warn: (...args) => {
     if (!shouldLog('warn')) return
+    console.warn(...args)
     write(
       'WARN',
       args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : a)).join(' ')
@@ -64,6 +67,7 @@ const prodLogger = {
   },
   error: (...args) => {
     if (!shouldLog('error')) return
+    console.error(...args)
     write(
       'ERROR',
       args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : a)).join(' ')

@@ -89,10 +89,15 @@ async function initQdrantCollections() {
   } catch (error) {
     const hostname = error?.cause?.hostname
     const code = error?.cause?.code
+    const qdrantUrl = process.env.QDRANT_URL || 'http://localhost:6333'
 
     if (code === 'ENOTFOUND' && hostname) {
       logger.error(
-        `Qdrant collection init failed: cannot resolve host "${hostname}". Set QDRANT_URL to a reachable host (Render internal URL or Qdrant Cloud URL).`
+        `Qdrant collection init failed: cannot resolve host "${hostname}" (QDRANT_URL=${qdrantUrl}). Set QDRANT_URL to a reachable host (Render internal URL or Qdrant Cloud URL).`
+      )
+    } else if (String(error?.message || '').includes('fetch failed')) {
+      logger.error(
+        `Qdrant collection init failed: fetch failed (QDRANT_URL=${qdrantUrl}). Check that Qdrant is reachable and, if using Qdrant Cloud, that QDRANT_API_KEY is set.`
       )
     } else {
       logger.error(`Qdrant collection init failed: ${error.message}`)
