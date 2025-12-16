@@ -6,7 +6,7 @@ https://www.notion.so/Minimal-AI-Customer-Support-Agent-2c23b149d4c180c6a0a8ce0a
 
 ## Diagram
 
-![App Flow Diagram](../App-Flow.png)
+![App Flow Diagram](./App-Flow.png)
 
 ## Installation (Docker)
 
