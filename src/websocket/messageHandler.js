@@ -36,10 +36,15 @@ const authenticateSocket = async (socket, next) => {
 }
 
 const handleCreateMessage = async (socket, data) => {
-  try {
-    const { chatId, content, mode, messageId } = data
+  let messageId = data?.messageId || 'unknown'
 
-    logger.info(`[WebSocket] Message creation started: ${messageId}`)
+  try {
+    const { chatId, content, mode, streaming = true } = data
+    messageId = data.messageId
+
+    logger.info(
+      `[WebSocket] Message creation started: ${messageId} (streaming: ${streaming})`
+    )
 
     socket.emit('message:received', {
       messageId,
@@ -57,6 +62,7 @@ const handleCreateMessage = async (socket, data) => {
       userId: socket.user.id,
       content,
       mode,
+      streaming,
       onProgress: (stage, details) => {
         try {
           const debug = {
@@ -77,11 +83,49 @@ const handleCreateMessage = async (socket, data) => {
           logger.warn(`VL_BACKEND_PROGRESS_LOG_ERROR ${e?.message || e}`)
         }
 
+        // Emit progress updates
         socket.emit('message:progress', {
           messageId,
           stage,
           details,
           timestamp: new Date().toISOString(),
+        })
+
+        // Emit chain of thoughts updates to client (news mode only)
+        if (stage === 'chain_of_thoughts') {
+          socket.emit('message:chain_of_thoughts', {
+            messageId,
+            phase: details?.phase,
+            status: details?.status,
+            analysis: details?.analysis,
+            strategy: details?.strategy,
+            evaluation: details?.evaluation,
+            sourceCount: details?.sourceCount,
+            reasoning: details?.reasoning,
+            phases: details?.phases,
+            timestamp: new Date().toISOString(),
+          })
+        }
+      },
+      onLLMChunk: (chunkData) => {
+        // Emit streaming chunks to client
+        socket.emit('message:chunk', {
+          messageId,
+          ...chunkData,
+        })
+      },
+      onLLMComplete: (completeData) => {
+        // Emit completion notification
+        socket.emit('message:llm_complete', {
+          messageId,
+          ...completeData,
+        })
+      },
+      onLLMError: (errorData) => {
+        // Emit LLM error
+        socket.emit('message:llm_error', {
+          messageId,
+          ...errorData,
         })
       },
     })

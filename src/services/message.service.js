@@ -1,12 +1,14 @@
 const Chat = require('../models/Chat')
 const Message = require('../models/Message')
 const { ApiError } = require('../utils/ApiError')
-const { processLLM } = require('./llm.service')
+const { processLLM, processLLMStreaming } = require('./llm.service')
 const chatService = require('./chat.service')
 const memoryService = require('./embeddings/memory.service')
 const chatHistoryCache = require('../cache/chatHistoryCache')
 const { runNewsRagPipeline } = require('../rag/pipeline/ragPipeline')
 const { createProgressData } = require('../utils/progressMessages')
+const { generateChainOfThoughts } = require('./chainOfThoughts.service')
+const logger = require('../utils/logger')
 
 const getLatestVersionContent = (message) =>
   message.versions[message.currentVersionIndex].content
@@ -71,7 +73,17 @@ const buildMessageSources = (newsResults) => {
   }))
 }
 
-const createMessage = async ({ chatId, userId, content, mode, onProgress }) => {
+const createMessage = async ({
+  chatId,
+  userId,
+  content,
+  mode,
+  streaming = true,
+  onProgress,
+  onLLMChunk,
+  onLLMComplete,
+  onLLMError,
+}) => {
   try {
     emitProgress(onProgress, 'chat_setup', 'initializing')
 
@@ -131,6 +143,10 @@ const createMessage = async ({ chatId, userId, content, mode, onProgress }) => {
     if (!isFirstMessage && chat.mode !== 'news') {
       emitProgress(onProgress, 'memory_recall', 'searching')
 
+      logger.info(
+        `[Message Service] Calling memory search - userId: ${userId}, chatId: ${chatId}, isFirstMessage: ${isFirstMessage}`
+      )
+
       memory = await memoryService.searchRelevant({
         userId,
         chatId,
@@ -138,6 +154,10 @@ const createMessage = async ({ chatId, userId, content, mode, onProgress }) => {
         limit: 5,
         minScore: 0.35,
       })
+
+      logger.info(
+        `[Message Service] Memory search completed - found ${memory.length} results`
+      )
 
       if (memory.length > 0) {
         emitProgress(onProgress, 'memory_recall', 'found', {
@@ -150,6 +170,7 @@ const createMessage = async ({ chatId, userId, content, mode, onProgress }) => {
 
     let newsResults = []
     let newsAbortMessage = null
+    let chainOfThoughts = null
 
     if (chat.mode === 'news') {
       emitProgress(onProgress, 'rag_pipeline', 'starting', {
@@ -169,6 +190,31 @@ const createMessage = async ({ chatId, userId, content, mode, onProgress }) => {
           count: ragResult.chunks?.length || 0,
         })
         newsResults = ragResult.chunks
+
+        // Generate chain of thoughts for news mode
+        if (newsResults.length > 0) {
+          emitProgress(onProgress, 'chain_of_thoughts', 'starting')
+
+          try {
+            chainOfThoughts = await generateChainOfThoughts({
+              userQuery: content,
+              newsResults,
+              onThoughtProgress: (stage, data) =>
+                emitProgress(onProgress, stage, data),
+            })
+
+            emitProgress(onProgress, 'chain_of_thoughts', 'completed', {
+              phases: chainOfThoughts.totalPhases,
+            })
+          } catch (chainError) {
+            logger.error(
+              `[Message Service] Chain of thoughts failed: ${chainError.message}`
+            )
+            emitProgress(onProgress, 'chain_of_thoughts', 'error', {
+              error: chainError.message,
+            })
+          }
+        }
       }
     }
 
@@ -196,18 +242,103 @@ const createMessage = async ({ chatId, userId, content, mode, onProgress }) => {
         model: chat.model,
       })
 
-      const llmOut = await processLLM({
-        model: chat.model,
-        messages: llmMessages,
-        isFirstMessage,
-      })
+      if (streaming) {
+        // Use streaming LLM service
+        let streamingAssistantMessage = null
+        let currentContent = ''
 
-      emitProgress(onProgress, 'llm_generation', 'completed', {
-        model: chat.model,
-      })
+        const llmOut = await processLLMStreaming({
+          messages: llmMessages,
+          isFirstMessage,
+          onChunk: (chunkData) => {
+            currentContent = chunkData.fullContent
 
-      assistantReply = llmOut.assistantReply
-      title = llmOut.title
+            // Create or update the assistant message with the current content
+            if (!streamingAssistantMessage) {
+              // Create the assistant message on first chunk
+              Message.create({
+                chatId,
+                userId: null,
+                role: 'assistant',
+                mode: chat.mode,
+                versions: [{ content: currentContent, model: chat.model }],
+                currentVersionIndex: 0,
+                sources:
+                  chat.mode === 'news' && newsResults.length > 0
+                    ? buildMessageSources(newsResults)
+                    : [],
+                chainOfThoughts:
+                  chat.mode === 'news' && chainOfThoughts
+                    ? chainOfThoughts
+                    : undefined,
+              })
+                .then((msg) => {
+                  streamingAssistantMessage = msg
+                  if (onLLMChunk) {
+                    onLLMChunk({
+                      ...chunkData,
+                      messageId: msg._id,
+                    })
+                  }
+                })
+                .catch((err) => {
+                  console.error('Error creating streaming message:', err)
+                })
+            } else {
+              // Update the existing message
+              streamingAssistantMessage.versions[0].content = currentContent
+              streamingAssistantMessage.save().catch((err) => {
+                console.error('Error updating streaming message:', err)
+              })
+
+              if (onLLMChunk) {
+                onLLMChunk({
+                  ...chunkData,
+                  messageId: streamingAssistantMessage._id,
+                })
+              }
+            }
+          },
+          onComplete: (completeData) => {
+            assistantReply = completeData.assistantReply
+            title = completeData.title
+
+            if (onLLMComplete) {
+              onLLMComplete({
+                ...completeData,
+                messageId: streamingAssistantMessage?._id,
+              })
+            }
+          },
+          onError: (errorData) => {
+            if (onLLMError) {
+              onLLMError(errorData)
+            }
+          },
+        })
+
+        emitProgress(onProgress, 'llm_generation', 'completed', {
+          model: chat.model,
+          streaming: true,
+        })
+
+        assistantReply = llmOut.assistantReply
+        title = llmOut.title
+      } else {
+        // Use non-streaming LLM service (backward compatibility)
+        const llmOut = await processLLM({
+          messages: llmMessages,
+          isFirstMessage,
+        })
+
+        emitProgress(onProgress, 'llm_generation', 'completed', {
+          model: chat.model,
+          streaming: false,
+        })
+
+        assistantReply = llmOut.assistantReply
+        title = llmOut.title
+      }
     }
 
     const messageSources =
@@ -217,15 +348,53 @@ const createMessage = async ({ chatId, userId, content, mode, onProgress }) => {
 
     emitProgress(onProgress, 'assistant_message', 'creating')
 
-    const assistantMessage = await Message.create({
-      chatId,
-      userId: null,
-      role: 'assistant',
-      mode: chat.mode,
-      versions: [{ content: assistantReply, model: chat.model }],
-      currentVersionIndex: 0,
-      sources: messageSources,
-    })
+    // For streaming, the message might already be created
+    let assistantMessage
+    if (streaming) {
+      // Look for existing streaming message or create new one
+      assistantMessage = await Message.findOne({
+        chatId,
+        role: 'assistant',
+        createdAt: { $gte: new Date(Date.now() - 10000) }, // Created within last 10 seconds
+      }).sort({ createdAt: -1 })
+
+      if (!assistantMessage) {
+        assistantMessage = await Message.create({
+          chatId,
+          userId: null,
+          role: 'assistant',
+          mode: chat.mode,
+          versions: [{ content: assistantReply, model: chat.model }],
+          currentVersionIndex: 0,
+          sources: messageSources,
+          chainOfThoughts:
+            chat.mode === 'news' && chainOfThoughts
+              ? chainOfThoughts
+              : undefined,
+        })
+      } else {
+        // Update existing message with final content and sources
+        assistantMessage.versions[0].content = assistantReply
+        assistantMessage.sources = messageSources
+        if (chat.mode === 'news' && chainOfThoughts) {
+          assistantMessage.chainOfThoughts = chainOfThoughts
+        }
+        await assistantMessage.save()
+      }
+    } else {
+      // Non-streaming: create message normally
+      assistantMessage = await Message.create({
+        chatId,
+        userId: null,
+        role: 'assistant',
+        mode: chat.mode,
+        versions: [{ content: assistantReply, model: chat.model }],
+        currentVersionIndex: 0,
+        sources: messageSources,
+        chainOfThoughts:
+          chat.mode === 'news' && chainOfThoughts ? chainOfThoughts : undefined,
+      })
+    }
 
     chatHistoryCache
       .append(chatId.toString(), [userMessage, assistantMessage])

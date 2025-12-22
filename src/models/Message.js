@@ -22,6 +22,28 @@ const messageVersionSchema = new mongoose.Schema(
   { _id: false }
 )
 
+const thoughtSchema = new mongoose.Schema(
+  {
+    phase: { type: String, required: true },
+    content: { type: String, required: true },
+    timestamp: { type: Date, default: Date.now },
+  },
+  { _id: false }
+)
+
+const chainOfThoughtsSchema = new mongoose.Schema(
+  {
+    success: { type: Boolean, default: true },
+    thoughts: {
+      type: [thoughtSchema],
+      default: [],
+    },
+    totalPhases: { type: Number, default: 0 },
+    generatedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+)
+
 const messageSchema = new mongoose.Schema(
   {
     chatId: {
@@ -67,6 +89,10 @@ messageSchema.add({
     default: function () {
       return this.role === 'assistant' ? [] : undefined
     },
+  },
+  chainOfThoughts: {
+    type: chainOfThoughtsSchema,
+    default: null,
   },
 })
 

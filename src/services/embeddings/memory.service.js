@@ -31,16 +31,23 @@ class MemoryService {
       const vector = await EmbeddingService.embedText(content)
 
       const payload = {
-        messageId,
-        chatId,
-        userId,
+        messageId: String(messageId),
+        chatId: String(chatId),
+        userId: String(userId),
         role,
         text: content,
         createdAt: Date.now(),
       }
 
       logger.info(
-        `Upserting vector: messageId=${messageId}, vectorDim=${vector.length}`
+        `[Memory Save] Upserting vector: messageId=${messageId}, vectorDim=${vector.length}`
+      )
+      logger.info(
+        `[Memory Save] Payload - userId: ${
+          payload.userId
+        } (type: ${typeof payload.userId}), chatId: ${
+          payload.chatId
+        } (type: ${typeof payload.chatId})`
       )
 
       await qdrant.upsert(MESSAGE_COLLECTION, {
@@ -78,20 +85,34 @@ class MemoryService {
 
   static async searchRelevant({ userId, chatId, content, limit = 5 }) {
     try {
+      logger.info(
+        `[Memory Search] Starting search - userId: ${userId}, chatId: ${chatId}, content length: ${content?.length}`
+      )
+      logger.info(
+        `[Memory Search] userId type: ${typeof userId}, chatId type: ${typeof chatId}`
+      )
+
       const vector = await EmbeddingService.embedText(content)
+      logger.info(
+        `[Memory Search] Generated embedding vector with ${vector.length} dimensions`
+      )
 
       const filter = {
         must: [
-          { key: 'userId', match: { value: userId } },
-          { key: 'chatId', match: { value: chatId } },
+          { key: 'userId', match: { value: String(userId) } },
+          { key: 'chatId', match: { value: String(chatId) } },
         ],
       }
+
+      logger.info(`[Memory Search] Filter: ${JSON.stringify(filter)}`)
 
       const raw = await qdrant.search(MESSAGE_COLLECTION, {
         vector,
         filter,
         limit: limit * 3,
       })
+
+      logger.info(`[Memory Search] Qdrant returned ${raw?.length || 0} results`)
 
       const scored = raw
         .map((item) => ({
@@ -104,9 +125,12 @@ class MemoryService {
         .sort((a, b) => b.score - a.score)
         .slice(0, limit)
 
+      logger.info(`[Memory Search] Returning ${scored.length} scored results`)
       return scored
     } catch (error) {
-      logger.error(`Vector search failed: ${error.message}`)
+      logger.error(`[Memory Search] Vector search failed: ${error.message}`)
+      logger.error(`[Memory Search] Error stack: ${error.stack}`)
+      logger.error(`[Memory Search] Error details:`, error)
       throw new ApiError(500, 'Memory search failed')
     }
   }

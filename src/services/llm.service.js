@@ -1,8 +1,11 @@
-const axios = require('axios')
+const { ChatOpenAI } = require('@langchain/openai')
+const { ChatOllama } = require('@langchain/ollama')
+const { HumanMessage, AIMessage } = require('@langchain/core/messages')
 const providers = require('../config/providers')
 const config = require('../config')
 const { ApiError } = require('../utils/ApiError')
 const { MAX_SINGLE_MESSAGE_CHARS, ERRORS } = require('../config/llmLimits')
+const logger = require('../utils/logger')
 
 const resolveProvider = () => {
   const provider = config.ai.provider || 'openai'
@@ -33,42 +36,140 @@ const validateLLMInput = (messages) => {
   }
 }
 
-const callOpenAI = async (model, messages) => {
-  const response = await axios.post(
-    'https://api.openai.com/v1/chat/completions',
-    {
+const createLangChainModel = () => {
+  const { name, model, baseUrl, apiKey } = resolveProvider()
+
+  if (name === 'ollama') {
+    return new ChatOllama({
       model,
-      messages,
-    },
-    {
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${providers.openai.apiKey}`,
-      },
-      timeout: 30000,
+      baseUrl: baseUrl.replace(/\/$/, ''),
+      temperature: 0.7,
+    })
+  }
+
+  return new ChatOpenAI({
+    modelName: model,
+    openAIApiKey: apiKey,
+    temperature: 0.7,
+    streaming: true,
+  })
+}
+
+const convertMessagesToLangChain = (messages) => {
+  return messages.map((msg) => {
+    if (msg.role === 'user') {
+      return new HumanMessage(msg.content)
+    } else if (msg.role === 'assistant') {
+      return new AIMessage(msg.content)
     }
-  )
-
-  return response.data?.choices?.[0]?.message?.content?.trim() || ''
+    // Handle system messages if needed
+    return new HumanMessage(msg.content)
+  })
 }
 
-const callOllama = async ({ baseUrl, model, messages }) => {
-  const url = `${baseUrl.replace(/\/$/, '')}/api/chat`
+const processLLMStreaming = async ({
+  messages,
+  isFirstMessage,
+  onChunk,
+  onComplete,
+  onError,
+}) => {
+  try {
+    validateLLMInput(messages)
 
-  const response = await axios.post(
-    url,
-    {
-      model,
-      messages,
-      stream: false,
-    },
-    { headers: { 'Content-Type': 'application/json' }, timeout: 300000 }
-  )
+    const model = createLangChainModel()
+    const langChainMessages = convertMessagesToLangChain(messages)
 
-  const content = response.data?.message?.content || ''
-  return content.trim()
+    let assistantReply = ''
+    let chunkCount = 0
+
+    logger.info(
+      `[Streaming LLM] Starting streaming with ${messages.length} messages`
+    )
+
+    // Stream the main response
+    const stream = await model.stream(langChainMessages)
+
+    for await (const chunk of stream) {
+      const content = chunk.content || ''
+
+      if (content) {
+        assistantReply += content
+        chunkCount++
+
+        // Emit chunk through callback
+        if (onChunk && typeof onChunk === 'function') {
+          onChunk({
+            type: 'chunk',
+            content,
+            fullContent: assistantReply,
+            chunkIndex: chunkCount,
+            timestamp: new Date().toISOString(),
+          })
+        }
+      }
+    }
+
+    logger.info(`[Streaming LLM] Completed streaming with ${chunkCount} chunks`)
+
+    // Generate title if it's the first message
+    let autoTitle = null
+    if (isFirstMessage) {
+      try {
+        const titleMessages = generateTitlePrompt(messages[0].content)
+        const titleLangChainMessages = convertMessagesToLangChain(titleMessages)
+
+        // For title generation, we don't need streaming
+        const titleModel = createLangChainModel()
+        const titleResponse = await titleModel.invoke(titleLangChainMessages)
+        const raw = titleResponse.content || ''
+
+        autoTitle = raw.replace(/["']/g, '').trim().slice(0, 80)
+        logger.info(`[Streaming LLM] Generated title: ${autoTitle}`)
+      } catch (titleError) {
+        logger.warn(
+          `[Streaming LLM] Title generation failed: ${titleError.message}`
+        )
+        autoTitle = null
+      }
+    }
+
+    // Emit completion
+    if (onComplete && typeof onComplete === 'function') {
+      onComplete({
+        type: 'complete',
+        assistantReply: assistantReply.trim(),
+        title: autoTitle,
+        totalChunks: chunkCount,
+        timestamp: new Date().toISOString(),
+      })
+    }
+
+    return {
+      assistantReply: assistantReply.trim(),
+      title: autoTitle,
+      totalChunks: chunkCount,
+    }
+  } catch (error) {
+    logger.error(`[Streaming LLM] Error during streaming: ${error.message}`)
+
+    if (onError && typeof onError === 'function') {
+      onError({
+        type: 'error',
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      })
+    }
+
+    throw error
+  }
 }
 
+/**
+ * Generates a prompt for creating a concise title from user message
+ * @param {string} message - The user's original message
+ * @returns {Array} Array of message objects for title generation
+ */
 const generateTitlePrompt = (message) => [
   {
     role: 'user',
@@ -78,36 +179,42 @@ const generateTitlePrompt = (message) => [
   { role: 'user', content: message },
 ]
 
+// Non-streaming version for compatibility
 const processLLM = async ({ messages, isFirstMessage }) => {
-  validateLLMInput(messages)
-
-  const { name, model, baseUrl } = resolveProvider()
-
-  let assistantReply
-  if (name === 'ollama') {
-    assistantReply = await callOllama({ baseUrl, model, messages })
-  } else {
-    assistantReply = await callOpenAI(model, messages)
-  }
-
-  let autoTitle = null
-  if (isFirstMessage) {
-    const titleMessages = generateTitlePrompt(messages[0].content)
-
-    let raw
-    if (name === 'ollama') {
-      raw = await callOllama({ baseUrl, model, messages: titleMessages })
-    } else {
-      raw = await callOpenAI(model, titleMessages)
+  return new Promise((resolve, reject) => {
+    let result = {
+      assistantReply: '',
+      title: null,
     }
 
-    autoTitle = raw.replace(/["']/g, '').trim().slice(0, 80)
-  }
-
-  return {
-    assistantReply,
-    title: autoTitle,
-  }
+    processLLMStreaming({
+      messages,
+      isFirstMessage,
+      onChunk: (data) => {
+        // Just accumulate chunks for non-streaming compatibility
+        result.assistantReply = data.fullContent
+      },
+      onComplete: (data) => {
+        result = {
+          assistantReply: data.assistantReply,
+          title: data.title,
+        }
+        resolve(result)
+      },
+      onError: (error) => {
+        reject(new Error(error.error))
+      },
+    })
+  })
 }
 
-module.exports = { processLLM }
+module.exports = {
+  processLLM,
+  processLLMStreaming,
+  createLangChainModel,
+  convertMessagesToLangChain,
+  // Utility functions (shared)
+  resolveProvider,
+  validateLLMInput,
+  generateTitlePrompt,
+}
